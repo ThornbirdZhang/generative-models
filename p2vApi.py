@@ -100,10 +100,10 @@ VERSION2SPECS = {
 app = FastAPI()
 
 class Photo2VideoRequest(BaseModel):
-    height: int
-    width: int
-    fps: int
-    frames: int
+    #height: int
+    #width: int
+    #fps: int
+    #frames: int
     url: str
 
 @app.get("/")
@@ -133,10 +133,10 @@ async def post_t2tt(api_key: str, content : Photo2VideoRequest):
     options = version_dict["options"]
 
     #from request
-    H = content.height
-    W = content.width
-    T = content.frames
-    F = content.fps
+    H = 576 #content.height
+    W = 1024 #content.width
+    T = 30 #content.frames
+    F = 8 #content.fps
     url = content.url
 
     if mode != "skip":
@@ -212,6 +212,9 @@ async def post_t2tt(api_key: str, content : Photo2VideoRequest):
     ret = {"result": str(result)} 
     retJson = json.dumps(ret)
     return ret 
+
+
+
 
 
 '''
