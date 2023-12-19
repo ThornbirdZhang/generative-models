@@ -34,6 +34,10 @@ from sgm.modules.diffusionmodules.sampling import (DPMPP2MSampler,
                                                    LinearMultistepSampler)
 from sgm.util import append_dims, default, instantiate_from_config
 
+import logging
+
+
+
 
 @st.cache_resource()
 def init_st(version_dict, load_ckpt=True, load_filter=True):
@@ -492,6 +496,9 @@ def do_sample(
     additional_batch_uc_fields=None,
     decoding_t=None,
 ):
+    print(f"sample={sampler}, value_dict={value_dict}, num_samples={num_samples}, H={H}, W={W}, C={C}, F={F}, force_uc_zero_embeddings={force_uc_zero_embeddings},\
+    force_cond_zero_embeddings={force_cond_zero_embeddings}, batch2model_input={batch2model_input},return_latents={return_latents},filter={filter},T={T},\
+    additional_batch_uc_fields={additional_batch_uc_fields},decoding_t={decoding_t}")
     force_uc_zero_embeddings = default(force_uc_zero_embeddings, [])
     batch2model_input = default(batch2model_input, [])
     additional_batch_uc_fields = default(additional_batch_uc_fields, [])
@@ -558,6 +565,7 @@ def do_sample(
                 randn = torch.randn(shape).to("cuda")
 
                 def denoiser(input, sigma, c):
+                    logging.debug(f"input={input}, sigma={sigma}, c={c}, additional_model_inputs={additional_model_inputs}")
                     return model.denoiser(
                         model.model, input, sigma, c, **additional_model_inputs
                     )
@@ -565,6 +573,7 @@ def do_sample(
                 load_model(model.denoiser)
                 load_model(model.model)
                 samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+                logging.debug(f"samples_z={samples_z}, randn={randn}, uc={uc}")
                 unload_model(model.model)
                 unload_model(model.denoiser)
 
@@ -574,6 +583,7 @@ def do_sample(
                 )
                 samples_x = model.decode_first_stage(samples_z)
                 samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
+                logging.debug(f"samples after clamp {samples}")
                 unload_model(model.first_stage_model)
 
                 if filter is not None:

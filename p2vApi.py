@@ -10,9 +10,12 @@ from scripts.demo.p2vApi_helper import *
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import json
+import asyncio
+import threading
+import logging
 
-
-SAVE_PATH = "outputs/api/vid/"
+SAVE_PATH = "/data/generative-models/outputs/api/vid/"
 
 VERSION2SPECS = {
     "svd": {
@@ -96,234 +99,250 @@ VERSION2SPECS = {
         },
     },
 }
+logging.basicConfig(
+    # format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='[%(asctime)s %(levelname)-7s (%(name)s) <%(process)d> %(filename)s:%(lineno)d] %(message)s',
+    level=logging.INFO
+)
+
+class MyClass:
+    pass
+
+class P2VActor:
+    def __init__(self, name: str):
+        self.name = name
+        #better in config, need modification for every node
+        self.www_folder = "/data/generative-models/outputs/api/vid/svd_xt/samples"
+        self.url_prefix = "http://192.168.15.51:7883/"
+
+
+        self.version = "svd_xt"
+
+        self.version_dict = VERSION2SPECS[self.version]
+        self.mode = "img2vid"
+
+
+        #self.H = self.version_dict["H"]
+        #self.W = self.version_dict["W"]
+        #self.T = self.version_dict["T"]
+        #self.C = self.version_dict["C"]
+        #self.F = self.version_dict["f"]
+        self.options = self.version_dict["options"]
+
+        #from request
+        self.H = 576 #content.height
+        self.W = 1024 #content.width
+        self.T = 8 #content.frames
+        self.F = 8 #content.fps
+        self.C = self.version_dict["C"]
+
+        self.state = init_st(self.version_dict, load_filter=True)
+        self.model = self.state["model"]
+
+        self.ukeys = set(
+            get_unique_embedder_keys_from_conditioner(self.state["model"].conditioner)
+        )
+
+        self.value_dict = init_embedder_options(
+            self.ukeys,
+            {},
+            self.F
+        )
+
+        self.value_dict["image_only_indicator"] = 0
+
+        self.seed = 23
+        seed_everything(self.seed)
+
+        self.save_locally, self.save_path = init_save_locally(
+            os.path.join(SAVE_PATH, self.version), init_value=True
+        )
+        logging.debug(f"save_locally={self.save_locally}, save_path={self.save_path}")
+        self.options["num_frames"] = self.T
+        logging.debug(f"options={self.options}")
+
+        self.sampler, self.num_rows, self.num_cols = init_sampling(options=self.options)
+        
+        self.num_samples = self.num_rows * self.num_cols
+        logging.debug(f"sample={self.sampler}, num_samples={self.num_samples}")
+
+        self.decoding_t = 2
+
+        self.saving_fps = self.value_dict["fps"]
+    
+        #print(f"model={self.model}, sample={self.sampler}, value_dict={self.value_dict}, num_samples={self.num_samples}, H={self.H}, \
+        #W={self.W}, C={self.C}, F={self.F}, T={self.T}, decoding_t={self.decoding_t}")
+    
+        self.task_id = None
+        self.result = 0 # 0, unknown; -1, failed; 1: success
+        self.status = 0 #0, init/empty; 1, doing
+        self.msg = "" #error msg
+        self.result_code = 100 # based on xme. 
+        self.result_url = ""
+        self.source_url = ""
+
+    def say_hello(self):
+        logging.debug(f"Hello, {self.name}!")
+
+    def init_task(self, url: str):
+        self.status = 1  #locked
+        self.task_id = self.name + datetime.now().strftime("%f")
+        self.result = 0 # 0, unknown; -1, failed; 1: success
+        self.msg = "" #error msg
+        self.result_code = 100 # based on xme. 
+        self.result_url = ""
+        self.source_url = url
+
+    async def start_task(self, url: str):
+        await self.do_sample(url)
+        return
+
+    #action function, url is the http photo
+    async def do_sample(self, url: str):
+        #empty? checked before, no need
+#        if self.status == 0 :
+         try:
+             img = load_img_for_prediction(self.W, self.H, url)
+             #print(f"1 image={img}")
+             cond_aug = 0.02
+             self.value_dict["cond_frames_without_noise"] = img
+             self.value_dict["cond_frames"] = img + cond_aug * torch.randn_like(img)
+             self.value_dict["cond_aug"] = cond_aug
+             logging.debug(f"2 image={img}")
+
+
+             out = do_sample(
+             self.model,
+             self.sampler,
+             self.value_dict,
+             self.num_samples,
+             self.H,
+             self.W,
+             self.C,
+             self.F,
+             T=self.T,
+             batch2model_input=["num_video_frames", "image_only_indicator"],
+             force_uc_zero_embeddings=self.options.get("force_uc_zero_embeddings", None),
+             force_cond_zero_embeddings=self.options.get(
+                 "force_cond_zero_embeddings", None
+             ),
+             return_latents=False,
+             decoding_t=self.decoding_t,
+             )
+
+             samples = None
+             samples_z=None
+             if isinstance(out, (tuple, list)):
+                 samples, samples_z = out
+                 logging.debug(f"samples={samples}, samples_z={samples_z}")
+             else:
+                 samples = out
+                 samples_z = None
+                 logging.debug(f"samples={samples}")
+
+             output_video = ""
+             if self.save_locally:
+                  output_video = save_video_as_grid_and_mp4(samples, self.save_path, self.T, fps=self.saving_fps)
+
+             #for output url 
+             listA = output_video.split('/')
+             listB = self.www_folder.split('/')
+             diff = list(set(listA) - set(listB))
+             self.result_url = self.url_prefix + '/'.join(diff)
+             logging.info(f'save_path={self.save_path}, www_folder={self.www_folder}, result_url={self.result_url}, diff={"/".join(diff)}')
+             self.result = 1
+             self.status = 0
+             self.result_code = 103
+             self.msg = "succeeded"
+
+         except Exception as e:
+             logging.debug(f"something wrong during task={self.task_id}, exception={repr(e)}")
+             self.result_url = ""
+             self.result = -1
+             self.status = 0
+             self.result_code = 104
+             self.msg = "something wrong during task=" + self.task_id + ", please contact admin."
+         finally:
+             self.status = 0
+#        elif(self.status == 1):
+#            print(f"task={self.task_id} is doing. cannot accept more. no more work")
+#        else:
+#            print(f"status={self.status}, not 1 or 0, invalid. current task_id={self.task_id} is doing. cannot accept more. no more work")
+
+
+    def get_status(self, task_id: str):
+        ret = MyClass()
+
+        if(task_id != self.task_id):
+            #not the current task
+            ret.result_url = ""
+            ret.result_code = 200
+            ret.msg = "cannot find task_id=" + task_id
+        else:
+            ret.result_url = self.result_url;
+            if(self.result == 0):
+                ret.result_code = 102
+                ret.msg = "task(" + task_id + ") is running."
+            elif(self.result == 1): 
+                ret.result_code = 103
+                ret.msg = "task(" + task_id + ") has succeeded."
+            elif(self.result == -1): 
+                ret.result_code = 104
+                ret.msg = "task(" + task_id + ") has failed."
+            else:
+                ret.result_code = 104
+                ret.msg = "task(" + task_id + ") has failed for uncertainly."     
+
+        retJ = {"result_url": ret.result_url, "result_code": ret.result_code, "msg": ret.msg}
+        retJson = json.dumps(retJ)
+        logging.debug(f"get_status for task_id={task_id}, return {retJson}" )
+        return retJson
+
+
 
 app = FastAPI()
+p2vActor = P2VActor("node_100")
+
+
 
 class Photo2VideoRequest(BaseModel):
     #height: int
     #width: int
     #fps: int
     #frames: int
-    url: str
+    image_url: str
 
 @app.get("/")
 async def root():
     return {"message": "Hello World, May God Bless You."}
 
-@app.post("/api/photo2Video/")
-async def post_t2tt(api_key: str, content : Photo2VideoRequest):
-    print(f"before infer, content= {content}")
-    #contentJson = json.loads(content)
-    #source = content.source_lang  #contentJson.get("source_lang")
-    #dest = content.dest_lang #contentJson.get("dest_lang")
-    #text = content.text  #contentJson.get("text")
+@app.post("/api/photo2Video/startTask")
+async def post_t2tt(content : Photo2VideoRequest):
+    logging.info(f"before infer, content= {content}")
+    result = MyClass()
 
-    #for init
-    version = "svd_xt"
-
-    version_dict = VERSION2SPECS[version]
-    mode = "img2vid"
-
-
-    H = version_dict["H"]
-    W = version_dict["W"]
-    T = version_dict["T"]
-    C = version_dict["C"]
-    F = version_dict["f"]
-    options = version_dict["options"]
-
-    #from request
-    H = 576 #content.height
-    W = 1024 #content.width
-    T = 30 #content.frames
-    F = 8 #content.fps
-    url = content.url
-
-    if mode != "skip":
-        state = init_st(version_dict, load_filter=True)
-        model = state["model"]
-
-        ukeys = set(
-            get_unique_embedder_keys_from_conditioner(state["model"].conditioner)
-        )
-
-        value_dict = init_embedder_options(
-            ukeys,
-            {},
-        )
-
-        value_dict["image_only_indicator"] = 0
-
-        if mode == "img2vid":
-            img = load_img_for_prediction(W, H, content.url)
-            cond_aug = 0.02
-            value_dict["cond_frames_without_noise"] = img
-            value_dict["cond_frames"] = img + cond_aug * torch.randn_like(img)
-            value_dict["cond_aug"] = cond_aug
-
-        seed = 23
-        seed_everything(seed)
-
-        save_locally, save_path = init_save_locally(
-            os.path.join(SAVE_PATH, version), init_value=True
-        )
-        print(f"save_locally={save_locally}, save_path={save_path}")
-        options["num_frames"] = T
-
-        sampler, num_rows, num_cols = init_sampling(options=options)
-        num_samples = num_rows * num_cols
-
-        decoding_t = 2
-
-        saving_fps = value_dict["fps"]
-    
-    print(f"model={model}, sample={sampler}, value_dict={value_dict}, num_samples={num_samples}, H={H}, W={W}, C={C}, F={F}, T={T}, decoding_t={decoding_t}")
-    out = do_sample(
-                model,
-                sampler,
-                value_dict,
-                num_samples,
-                H,
-                W,
-                C,
-                F,
-                T=T,
-                batch2model_input=["num_video_frames", "image_only_indicator"],
-                force_uc_zero_embeddings=options.get("force_uc_zero_embeddings", None),
-                force_cond_zero_embeddings=options.get(
-                    "force_cond_zero_embeddings", None
-                ),
-                return_latents=False,
-                decoding_t=decoding_t,
-            )
-
-    if isinstance(out, (tuple, list)):
-          samples, samples_z = out
+    if(p2vActor.status != 0):
+        logging.warn(f"engine is busy with task={p2vActor.task_id}, cannot accept more.")
+        result.task_id = ""
+        result.result_code = 203
+        result.msg = "engine is busy with task, cannot accept more."
     else:
-          samples = out
-          samples_z = None
+        p2vActor.init_task(content.image_url)
+        result.task_id = p2vActor.task_id
+        result.result_code = 102
+        result.msg = "task_id=" + p2vActor.task_id + " has started."
+        task = asyncio.create_task(p2vActor.start_task(p2vActor.source_url))
+        #thread = threading.Thread(target = p2vActor.do_sample, args=(p2vActor.source_url,))
+        #hread.start()
+        
 
-    if save_locally:
-         save_video_as_grid_and_mp4(samples, save_path, T, fps=saving_fps)
+    retJ = {"task_id":result.task_id, "result_code": result.result_code, "msg": result.msg}
+    retJson = json.dumps(retJ)
+    logging.debug(f"url={content.image_url}, task_id={result.task_id}, return {retJson}")
 
-    result = "url"
+    return retJson 
 
-    print(f"after infer, result= {result}")
-    ret = {"result": str(result)} 
-    retJson = json.dumps(ret)
-    return ret 
-
-
-
-
-
-'''
-if __name__ == "__main__":
-    st.title("Stable Video Diffusion")
-    version = st.selectbox(
-        "Model Version",
-        [k for k in VERSION2SPECS.keys()],
-        0,
-    )
-    version_dict = VERSION2SPECS[version]
-    if st.checkbox("Load Model"):
-        mode = "img2vid"
-    else:
-        mode = "skip"
-
-    H = st.sidebar.number_input(
-        "H", value=version_dict["H"], min_value=64, max_value=2048
-    )
-    W = st.sidebar.number_input(
-        "W", value=version_dict["W"], min_value=64, max_value=2048
-    )
-    T = st.sidebar.number_input(
-        "T", value=version_dict["T"], min_value=0, max_value=128
-    )
-    C = version_dict["C"]
-    F = version_dict["f"]
-    options = version_dict["options"]
-
-    if mode != "skip":
-        state = init_st(version_dict, load_filter=True)
-        if state["msg"]:
-            st.info(state["msg"])
-        model = state["model"]
-
-        ukeys = set(
-            get_unique_embedder_keys_from_conditioner(state["model"].conditioner)
-        )
-
-        value_dict = init_embedder_options(
-            ukeys,
-            {},
-        )
-
-        value_dict["image_only_indicator"] = 0
-
-        if mode == "img2vid":
-            img = load_img_for_prediction(W, H)
-            cond_aug = st.number_input(
-                "Conditioning augmentation:", value=0.02, min_value=0.0
-            )
-            value_dict["cond_frames_without_noise"] = img
-            value_dict["cond_frames"] = img + cond_aug * torch.randn_like(img)
-            value_dict["cond_aug"] = cond_aug
-
-        seed = st.sidebar.number_input(
-            "seed", value=23, min_value=0, max_value=int(1e9)
-        )
-        seed_everything(seed)
-
-        save_locally, save_path = init_save_locally(
-            os.path.join(SAVE_PATH, version), init_value=True
-        )
-
-        options["num_frames"] = T
-
-        sampler, num_rows, num_cols = init_sampling(options=options)
-        num_samples = num_rows * num_cols
-
-        decoding_t = st.number_input(
-            "Decode t frames at a time (set small if you are low on VRAM)",
-            value=options.get("decoding_t", T),
-            min_value=1,
-            max_value=int(1e9),
-        )
-
-        if st.checkbox("Overwrite fps in mp4 generator", False):
-            saving_fps = st.number_input(
-                f"saving video at fps:", value=value_dict["fps"], min_value=1
-            )
-        else:
-            saving_fps = value_dict["fps"]
-
-        if st.button("Sample"):
-            out = do_sample(
-                model,
-                sampler,
-                value_dict,
-                num_samples,
-                H,
-                W,
-                C,
-                F,
-                T=T,
-                batch2model_input=["num_video_frames", "image_only_indicator"],
-                force_uc_zero_embeddings=options.get("force_uc_zero_embeddings", None),
-                force_cond_zero_embeddings=options.get(
-                    "force_cond_zero_embeddings", None
-                ),
-                return_latents=False,
-                decoding_t=decoding_t,
-            )
-
-            if isinstance(out, (tuple, list)):
-                samples, samples_z = out
-            else:
-                samples = out
-                samples_z = None
-
-            if save_locally:
-                save_video_as_grid_and_mp4(samples, save_path, T, fps=saving_fps)
-'''
+@app.get("/api/photo2Video/getStatus")
+async def get_status(taskID:str):
+    logging.info(f"before get_status, taskID= {taskID}")
+    return p2vActor.get_status(taskID)

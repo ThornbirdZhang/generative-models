@@ -1,4 +1,5 @@
 import copy
+from ctypes.wintypes import INT
 import math
 import os
 from glob import glob
@@ -18,6 +19,7 @@ from safetensors.torch import load_file as load_safetensors
 from torch import autocast
 from torchvision import transforms
 from torchvision.utils import make_grid, save_image
+import logging
 
 from scripts.demo.discretization import (Img2ImgDiscretizationWrapper,
                                          Txt2NoisyDiscretizationWrapper)
@@ -88,13 +90,13 @@ def load_model_from_config(config, ckpt=None, verbose=True):
     model = instantiate_from_config(config.model)
 
     if ckpt is not None:
-        print(f"Loading model from {ckpt}")
+        logging.debug(f"Loading model from {ckpt}")
         if ckpt.endswith("ckpt"):
             pl_sd = torch.load(ckpt, map_location="cpu")
             if "global_step" in pl_sd:
                 global_step = pl_sd["global_step"]
                 #st.info(f"loaded ckpt from global step {global_step}")
-                print(f"Global Step: {pl_sd['global_step']}")
+                logging.debug(f"Global Step: {pl_sd['global_step']}")
             sd = pl_sd["state_dict"]
         elif ckpt.endswith("safetensors"):
             sd = load_safetensors(ckpt)
@@ -106,11 +108,11 @@ def load_model_from_config(config, ckpt=None, verbose=True):
         m, u = model.load_state_dict(sd, strict=False)
 
         if len(m) > 0 and verbose:
-            print("missing keys:")
-            print(m)
+            logging.debug("missing keys:")
+            logging.debug(m)
         if len(u) > 0 and verbose:
-            print("unexpected keys:")
-            print(u)
+            logging.debug("unexpected keys:")
+            logging.debug(u)
     else:
         msg = None
 
@@ -123,7 +125,7 @@ def get_unique_embedder_keys_from_conditioner(conditioner):
     return list(set([x.input_key for x in conditioner.embedders]))
 
 
-def init_embedder_options(keys, init_dict, prompt=None, negative_prompt=None):
+def init_embedder_options(keys, init_dict, fps_set:INT, prompt=None, negative_prompt=None):
     # Hardcoded demo settings; might undergo some changes in the future
 
     value_dict = {}
@@ -160,7 +162,7 @@ def init_embedder_options(keys, init_dict, prompt=None, negative_prompt=None):
             value_dict["target_height"] = init_dict["target_height"]
 
         if key in ["fps_id", "fps"]:
-            fps = 15
+            fps = fps_set
 
             value_dict["fps"] = fps
             value_dict["fps_id"] = fps - 1
@@ -284,7 +286,7 @@ def get_discretization(discretization, options, key=1):
         }
     elif discretization == "EDMDiscretization":
         #from UI now
-        sigma_min = 0.00  # 0.0292
+        sigma_min = 0.002  # 0.0292
         sigma_max = 700  # 14.6146
         rho = 7.00 
         discretization_config = {
@@ -394,7 +396,7 @@ def load_img(
         return None
 
     w, h = image.size
-    print(f"loaded input image of size ({w}, {h})")
+    logging.debug(f"loaded input image of size ({w}, {h})")
 
     transform = []
     if size is not None:
@@ -433,6 +435,10 @@ def do_sample(
     additional_batch_uc_fields=None,
     decoding_t=None,
 ):
+    logging.debug(f"sample={sampler}, value_dict={value_dict}, num_samples={num_samples}, H={H}, W={W}, C={C}, F={F}, force_uc_zero_embeddings={force_uc_zero_embeddings},\
+    force_cond_zero_embeddings={force_cond_zero_embeddings}, batch2model_input={batch2model_input},return_latents={return_latents},filter={filter},T={T},\
+    additional_batch_uc_fields={additional_batch_uc_fields},decoding_t={decoding_t}")
+
     force_uc_zero_embeddings = default(force_uc_zero_embeddings, [])
     batch2model_input = default(batch2model_input, [])
     additional_batch_uc_fields = default(additional_batch_uc_fields, [])
@@ -495,9 +501,11 @@ def do_sample(
                         additional_model_inputs[k] = batch[k]
 
                 shape = (math.prod(num_samples), C, H // F, W // F)
+                logging.debug(f"shape={shape}")
                 randn = torch.randn(shape).to("cuda")
 
                 def denoiser(input, sigma, c):
+                    logging.debug(f"input={input}, sigma={sigma}, c={c}, additional_model_inputs={additional_model_inputs}")
                     return model.denoiser(
                         model.model, input, sigma, c, **additional_model_inputs
                     )
@@ -505,6 +513,7 @@ def do_sample(
                 load_model(model.denoiser)
                 load_model(model.model)
                 samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+                logging.debug(f"samples_z={samples_z}, randn={randn}, uc={uc}")
                 unload_model(model.model)
                 unload_model(model.denoiser)
 
@@ -514,10 +523,12 @@ def do_sample(
                 )
                 samples_x = model.decode_first_stage(samples_z)
                 samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
+                logging.debug(f"samples after clamp {samples}")
                 unload_model(model.first_stage_model)
 
                 if filter is not None:
                     samples = filter(samples)
+                    logging.debug(f"samples after filter {samples}")
 
                 if T is None:
                     grid = torch.stack([samples])
@@ -528,7 +539,7 @@ def do_sample(
                     for i, vid in enumerate(as_vids):
                         grid = rearrange(make_grid(vid, nrow=4), "c h w -> h w c")
 
-
+                logging.debug(f"samples before return {samples}, samples_z {samples_z}")
                 if return_latents:
                     return samples, samples_z
                 return samples
@@ -746,14 +757,18 @@ def get_interactive_image(url:str, key=None) -> Image.Image:
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     image = "input/" + current_time;
-    print(f'save url={url} to image={image}')
+    logging.debug(f'save url={url} to image={image}')
     urllib.request.urlretrieve(url, image)
+
     if image is not None:
+        logging.debug(f"after urlretrieve image={image}")
         image = Image.open(image)
+        logging.debug(f"after open image={image}")
         if not image.mode == "RGB":
             image = image.convert("RGB")
+            logging.debug(f"after convert image={image}")
         return image
-
+    logging.debug(f'image == None???')
 
 def load_img_for_prediction(
     W: int, H: int, url: str, display=True, key=None, device="cuda"
@@ -762,6 +777,8 @@ def load_img_for_prediction(
     if image is None:
         return None
     w, h = image.size
+
+    logging.debug(f"url={url} size w={w},h={h}")
 
     image = np.array(image).transpose(2, 0, 1)
     image = torch.from_numpy(image).to(dtype=torch.float32) / 255.0
@@ -782,12 +799,14 @@ def load_img_for_prediction(
 
 def save_video_as_grid_and_mp4(
     video_batch: torch.Tensor, save_path: str, T: int, fps: int = 5
-):
+) -> str:
     os.makedirs(save_path, exist_ok=True)
     base_count = len(glob(os.path.join(save_path, "*.mp4")))
 
     video_batch = rearrange(video_batch, "(b t) c h w -> b t c h w", t=T)
     video_batch = embed_watermark(video_batch)
+    
+    output_video = ""
     for vid in video_batch:
         save_image(vid, fp=os.path.join(save_path, f"{base_count:06d}.png"), nrow=4)
 
@@ -812,7 +831,9 @@ def save_video_as_grid_and_mp4(
         video_path_h264 = video_path[:-4] + "_h264.mp4"
         os.system(f"ffmpeg -i {video_path} -c:v libx264 {video_path_h264}")
 
-        with open(video_path_h264, "rb") as f:
-            video_bytes = f.read()
+        #with open(video_path_h264, "rb") as f:
+        #    video_bytes = f.read()
 
         base_count += 1
+        output_video = video_path_h264
+    return output_video

@@ -15,6 +15,8 @@ from ...modules.diffusionmodules.sampling_utils import (get_ancestral_step,
                                                         to_sigma)
 from ...util import append_dims, default, instantiate_from_config
 
+import logging
+
 DEFAULT_GUIDER = {"target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"}
 
 
@@ -28,7 +30,9 @@ class BaseDiffusionSampler:
         device: str = "cuda",
     ):
         self.num_steps = num_steps
+        logging.debug(f"self.num_steps={self.num_steps}, discretization_config={discretization_config}")
         self.discretization = instantiate_from_config(discretization_config)
+        logging.debug(f"self.discretization={self.discretization}")
         self.guider = instantiate_from_config(
             default(
                 guider_config,
@@ -39,9 +43,11 @@ class BaseDiffusionSampler:
         self.device = device
 
     def prepare_sampling_loop(self, x, cond, uc=None, num_steps=None):
+        logging.debug(f"self.num_steps={self.num_steps}")
         sigmas = self.discretization(
             self.num_steps if num_steps is None else num_steps, device=self.device
         )
+        logging.debug(f"sigmas={sigmas}")
         uc = default(uc, cond)
 
         x *= torch.sqrt(1.0 + sigmas[0] ** 2.0)
@@ -107,9 +113,11 @@ class EDMSampler(SingleStepDiffusionSampler):
         return x
 
     def __call__(self, denoiser, x, cond, uc=None, num_steps=None):
+        logging.debug(f"x={x}, cond={cond}, uc={uc}, num_steps={num_steps}")
         x, s_in, sigmas, num_sigmas, cond, uc = self.prepare_sampling_loop(
             x, cond, uc, num_steps
         )
+        logging.debug(f"after prepare_sampling x={x}, s_in={s_in}, sigmas={sigmas}, num_sigmas={num_sigmas}, cond={cond}, uc={uc}")
 
         for i in self.get_sigma_gen(num_sigmas):
             gamma = (
@@ -117,6 +125,7 @@ class EDMSampler(SingleStepDiffusionSampler):
                 if self.s_tmin <= sigmas[i] <= self.s_tmax
                 else 0.0
             )
+            logging.debug(f"gamma={gamma}")
             x = self.sampler_step(
                 s_in * sigmas[i],
                 s_in * sigmas[i + 1],
@@ -126,7 +135,9 @@ class EDMSampler(SingleStepDiffusionSampler):
                 uc,
                 gamma,
             )
+            logging.debug(f"after step {i} x={x}")
 
+        logging.debug(f"before return x={x}")
         return x
 
 
