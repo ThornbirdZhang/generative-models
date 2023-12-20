@@ -14,6 +14,7 @@ import json
 import asyncio
 import threading
 import logging
+import requests
 
 SAVE_PATH = "/data/generative-models/outputs/api/vid/"
 
@@ -113,7 +114,10 @@ class P2VActor:
         self.name = name
         #better in config, need modification for every node
         self.www_folder = "/data/generative-models/outputs/api/vid/svd_xt/samples"
-        self.url_prefix = "http://192.168.15.51:7883/"
+        public_ip = self.get_public_ip()
+        logging.info(f"public ip for this module is {public_ip}")
+        self.url_prefix = "http://" + public_ip + ":8076/"
+        #"http://192.168.15.51:7883/"
 
 
         self.version = "svd_xt"
@@ -183,6 +187,10 @@ class P2VActor:
 
     def say_hello(self):
         logging.debug(f"Hello, {self.name}!")
+    
+    def get_public_ip(self):
+        response = requests.get('https://ifconfig.me/ip')
+        return response.text
 
     def init_task(self, url: str):
         self.status = 1  #locked
@@ -193,12 +201,12 @@ class P2VActor:
         self.result_url = ""
         self.source_url = url
 
-    async def start_task(self, url: str):
-        await self.do_sample(url)
+    def start_task(self, url: str):
+        self.do_sample(url)
         return
 
     #action function, url is the http photo
-    async def do_sample(self, url: str):
+    def do_sample(self, url: str):
         #empty? checked before, no need
 #        if self.status == 0 :
          try:
@@ -331,14 +339,16 @@ async def post_t2tt(content : Photo2VideoRequest):
         result.task_id = p2vActor.task_id
         result.result_code = 102
         result.msg = "task_id=" + p2vActor.task_id + " has started."
-        task = asyncio.create_task(p2vActor.start_task(p2vActor.source_url))
-        #thread = threading.Thread(target = p2vActor.do_sample, args=(p2vActor.source_url,))
-        #hread.start()
+        loop = asyncio.get_event_loop()
+        #task = loop.create_task(p2vActor.start_task(p2vActor.source_url))
+        thread = threading.Thread(target = p2vActor.start_task, args=(p2vActor.source_url,))
+        thread.daemon = True
+        thread.start()
         
 
     retJ = {"task_id":result.task_id, "result_code": result.result_code, "msg": result.msg}
     retJson = json.dumps(retJ)
-    logging.debug(f"url={content.image_url}, task_id={result.task_id}, return {retJson}")
+    logging.info(f"url={content.image_url}, task_id={result.task_id}, return {retJson}")
 
     return retJson 
 
