@@ -7,7 +7,7 @@ from pytorch_lightning import seed_everything
 from scripts.demo.p2vApi_helper import *
 
 #for fastapi
-from fastapi import FastAPI
+from fastapi import FastAPI , Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import json
@@ -260,7 +260,7 @@ class P2VActor:
              logging.info(f'save_path={self.save_path}, www_folder={self.www_folder}, result_url={self.result_url}, diff={"/".join(diff)}')
              self.result = 1
              self.status = 0
-             self.result_code = 103
+             self.result_code = 100
              self.msg = "succeeded"
 
          except Exception as e:
@@ -268,7 +268,7 @@ class P2VActor:
              self.result_url = ""
              self.result = -1
              self.status = 0
-             self.result_code = 104
+             self.result_code = 103
              self.msg = "something wrong during task=" + self.task_id + ", please contact admin."
          finally:
              self.status = 0
@@ -292,19 +292,19 @@ class P2VActor:
                 ret.result_code = 102
                 ret.msg = "task(" + task_id + ") is running."
             elif(self.result == 1): 
-                ret.result_code = 103
+                ret.result_code = 100
                 ret.msg = "task(" + task_id + ") has succeeded."
             elif(self.result == -1): 
-                ret.result_code = 104
+                ret.result_code = 103
                 ret.msg = "task(" + task_id + ") has failed."
             else:
-                ret.result_code = 104
+                ret.result_code = 103
                 ret.msg = "task(" + task_id + ") has failed for uncertainly."     
-
-        retJ = {"result_url": ret.result_url, "result_code": ret.result_code, "msg": ret.msg}
-        retJson = json.dumps(retJ)
-        logging.debug(f"get_status for task_id={task_id}, return {retJson}" )
-        return retJson
+        
+        retJ = {"result_url": ret.result_url, "result_code": ret.result_code, "msg": ret.msg,"api_time_consume":self.T/self.F, "api_time_left":0, "video_w":0, "video_h":0, "gpu_type":"", "gpu_time_estimate":0, "gpu_time_use":0}
+        #retJson = json.dumps(retJ)
+        logging.debug(f"get_status for task_id={task_id}, return {retJ}" )
+        return retJ
 
 
 
@@ -337,7 +337,7 @@ async def post_t2tt(content : Photo2VideoRequest):
     else:
         p2vActor.init_task(content.image_url)
         result.task_id = p2vActor.task_id
-        result.result_code = 102
+        result.result_code = 100
         result.msg = "task_id=" + p2vActor.task_id + " has started."
         loop = asyncio.get_event_loop()
         #task = loop.create_task(p2vActor.start_task(p2vActor.source_url))
@@ -347,10 +347,12 @@ async def post_t2tt(content : Photo2VideoRequest):
         
 
     retJ = {"task_id":result.task_id, "result_code": result.result_code, "msg": result.msg}
-    retJson = json.dumps(retJ)
-    logging.info(f"url={content.image_url}, task_id={result.task_id}, return {retJson}")
+    #response = Response(content=retJ, media_type="application/json")
+    #retJson = json.dumps(retJ)
+    logging.info(f"url={content.image_url}, task_id={result.task_id}, return {retJ}")
 
-    return retJson 
+    #return response
+    return retJ
 
 @app.get("/api/photo2Video/getStatus")
 async def get_status(taskID:str):
